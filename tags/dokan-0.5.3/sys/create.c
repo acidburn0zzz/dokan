@@ -610,8 +610,12 @@ DokanCompleteCreate(
 				DokanNotifyReportChange(fcb, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
 			}
 		}
+	} else {
+		DDbgPrint("   IRP_MJ_CREATE failed. Free CCB:%X\n", ccb);
+        DokanFreeCCB(ccb);
+		DokanFreeFCB(fcb);
 	}
-	
+
 	irp->IoStatus.Status = status;
 	irp->IoStatus.Information = info;
 	IoCompleteRequest(irp, IO_NO_INCREMENT);
