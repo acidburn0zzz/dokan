@@ -108,8 +108,22 @@ Return Value:
 
 		// make a MDL for UserBuffer that can be used later on another thread context
 		if (Irp->MdlAddress == NULL) {
-			status = DokanAllocateMdl(Irp,  irpSp->Parameters.Read.Length);
-			if (!NT_SUCCESS(status)) {
+			PMDL mdl = IoAllocateMdl(Irp->UserBuffer, irpSp->Parameters.Read.Length, FALSE, FALSE, Irp);
+
+			if (mdl == NULL) {
+				status = STATUS_INSUFFICIENT_RESOURCES;
+			} else {
+				__try {
+					MmProbeAndLockPages(Irp->MdlAddress, Irp->RequestorMode, IoWriteAccess);
+	
+				} __except (EXCEPTION_EXECUTE_HANDLER) {
+					DDbgPrint("    MmProveAndLockPages error\n");
+					IoFreeMdl(Irp->MdlAddress);
+					Irp->MdlAddress = NULL;
+					status =  STATUS_INSUFFICIENT_RESOURCES;
+				}
+			}
+			if (status == STATUS_INSUFFICIENT_RESOURCES) {
 				__leave;
 			}
 		}
@@ -246,9 +260,7 @@ DokanCompleteRead(
 		readLength = EventInfo->BufferLength;
 		status = EventInfo->Status;
 
-		if (NT_SUCCESS(status) &&
-			 EventInfo->BufferLength > 0 &&
-			 (fileObject->Flags & FO_SYNCHRONOUS_IO) &&
+		if ((fileObject->Flags & FO_SYNCHRONOUS_IO) &&
 			!(irp->Flags & IRP_PAGING_IO)) {
 			// update current byte offset only when synchronous IO and not pagind IO
 			fileObject->CurrentByteOffset.QuadPart =

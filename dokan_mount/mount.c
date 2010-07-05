@@ -24,7 +24,6 @@ THE SOFTWARE.
 #include <windows.h>
 #include <winioctl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include "mount.h"
 
 typedef struct _REPARSE_DATA_BUFFER {
@@ -57,8 +56,8 @@ typedef struct _REPARSE_DATA_BUFFER {
 
 BOOL
 CreateMountPoint(
-	LPCWSTR	MountPoint,
-	LPCWSTR	DeviceName)
+	PWCHAR	ReparsePointName,
+	PWCHAR	TargetDeviceName)
 {
 	HANDLE handle;
 	PREPARSE_DATA_BUFFER reparseData;
@@ -66,21 +65,17 @@ CreateMountPoint(
 	USHORT	targetLength;
 	BOOL	result;
 	ULONG	resultLength;
-	WCHAR	targetDeviceName[MAX_PATH] =  L"\\??";
-
-	wcscat_s(targetDeviceName, MAX_PATH, DeviceName);
-	wcscat_s(targetDeviceName, MAX_PATH, L"\\");
-
+	
 	handle = CreateFile(
-		MountPoint, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+		ReparsePointName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
 		FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
 
 	if (handle == INVALID_HANDLE_VALUE) {
-		DbgPrintW(L"CreateFile failed: %s (%d)\n", MountPoint, GetLastError());
+		DbgPrintW(L"CreateFile failed: %s (%d)\n", ReparsePointName, GetLastError());
 		return FALSE;
 	}
 
-	targetLength = wcslen(targetDeviceName) * sizeof(WCHAR);
+	targetLength = wcslen(TargetDeviceName) * sizeof(WCHAR);
 	bufferLength = FIELD_OFFSET(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer) +
 		targetLength + sizeof(WCHAR) + sizeof(WCHAR);
 
@@ -96,7 +91,7 @@ CreateMountPoint(
 	reparseData->MountPointReparseBuffer.PrintNameOffset = targetLength + sizeof(WCHAR);
 	reparseData->MountPointReparseBuffer.PrintNameLength = 0;
 
-	RtlCopyMemory(reparseData->MountPointReparseBuffer.PathBuffer, targetDeviceName, targetLength);
+	RtlCopyMemory(reparseData->MountPointReparseBuffer.PathBuffer, TargetDeviceName, targetLength);
 
 	result = DeviceIoControl(
 				handle,
@@ -113,17 +108,17 @@ CreateMountPoint(
 
 	if (result) {
 		DbgPrintW(L"CreateMountPoint %s -> %s success\n",
-			MountPoint, targetDeviceName);
+			ReparsePointName, TargetDeviceName);
 	} else {
 		DbgPrintW(L"CreateMountPoint %s -> %s failed: %d\n",
-			MountPoint, targetDeviceName, GetLastError());
+			ReparsePointName, TargetDeviceName, GetLastError());
 	}
 	return result;
 }
 
 BOOL
 DeleteMountPoint(
-	LPCWSTR	MountPoint)
+	PWCHAR	ReparsePointName)
 {
 	HANDLE	handle;
 	BOOL	result;
@@ -131,11 +126,11 @@ DeleteMountPoint(
 	REPARSE_GUID_DATA_BUFFER	reparseData = { 0 };
 
 	handle = CreateFile(
-		MountPoint, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+		ReparsePointName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
 		FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
 
 	if (handle == INVALID_HANDLE_VALUE) {
-		DbgPrintW(L"CreateFile failed: %s (%d)\n", MountPoint, GetLastError());
+		DbgPrintW(L"CreateFile failed: %s (%d)\n", ReparsePointName, GetLastError());
 		return FALSE;
 	}
 
@@ -154,31 +149,36 @@ DeleteMountPoint(
 	CloseHandle(handle);
 
 	if (result) {
-		DbgPrintW(L"DeleteMountPoint %s success\n", MountPoint);
+		DbgPrintW(L"DeleteMountPoint success\n");
 	} else {
-		DbgPrintW(L"DeleteMountPoint %s failed: %d\n", MountPoint, GetLastError());
+		DbgPrintW(L"DeleteMountPoint failed: %d\n", GetLastError());
 	}
 	return result;
 }
 
+
 BOOL
-CreateDriveLetter(
-	WCHAR		DriveLetter,
-	LPCWSTR	DeviceName)
+DokanControlMount(
+	ULONG	DeviceNumber,
+	WCHAR	DriveLetter)
 {
-	WCHAR   dosDevice[] = L"\\\\.\\C:";
-	WCHAR   driveName[] = L"C:";
-	WCHAR	rawDeviceName[MAX_PATH] = L"\\Device";
+	WCHAR   volumeName[] = L"\\\\.\\ :";
+	WCHAR	driveLetterAndSlash[] = L"C:\\";
 	HANDLE  device;
+	WCHAR	deviceName[MAX_PATH];
+	WCHAR	mountPoint[MAX_PATH];
+	
+	wsprintf(deviceName, DOKAN_RAW_DEVICE_NAME, DeviceNumber);
+	wsprintf(mountPoint, DOKAN_MOUNT_DEVICE_NAME, DeviceNumber);
 
-	dosDevice[4] = DriveLetter;
-	driveName[0] = DriveLetter;
-	wcscat_s(rawDeviceName, MAX_PATH, DeviceName);
+	volumeName[4] = DriveLetter;
+	driveLetterAndSlash[0] = DriveLetter;
 
-	DbgPrintW(L"DriveLetter: %c, DeviceName %s\n", DriveLetter, rawDeviceName);
+	DbgPrintW(L"DeviceNumber %d DriveLetter %c\n", DeviceNumber, DriveLetter);
+	DbgPrintW(L"DeviceName %s\n",deviceName);
 
 	device = CreateFile(
-		dosDevice,
+		volumeName,
 		GENERIC_READ | GENERIC_WRITE,
 		FILE_SHARE_READ | FILE_SHARE_WRITE,
 		NULL,
@@ -188,18 +188,51 @@ CreateDriveLetter(
 		);
 
     if (device != INVALID_HANDLE_VALUE) {
-		DbgPrintW(L"DokanControl Mount failed: %c: is alredy used\n", DriveLetter);
+		DbgPrintW(L"DokanControl Mount failed: %wc: is alredy used\n", DriveLetter);
 		CloseHandle(device);
         return FALSE;
     }
 
-    if (!DefineDosDevice(DDD_RAW_TARGET_PATH, driveName, rawDeviceName)) {
+    if (!DefineDosDevice(DDD_RAW_TARGET_PATH, &volumeName[4], deviceName)) {
 		DbgPrintW(L"DokanControl DefineDosDevice failed: %d\n", GetLastError());
         return FALSE;
     }
 
-	device = CreateFile(
-        dosDevice,
+	/* NOTE: IOCTL_MOUNTDEV_QUERY_DEVICE_NAME in sys/device.cc handles
+	   GetVolumeNameForVolumeMountPoint. But it returns error even if driver
+	   return success.
+	   */
+
+	//wsprintf(deviceName, L"\\\\?\\Volume{dca0e0a5-d2ca-4f0f-8416-a6414657a77a}\\");
+	//DbgPrintW(L"DeviceName %s\n",deviceName);
+
+	/*
+	if (!GetVolumeNameForVolumeMountPoint(
+			driveLetterAndSlash, 
+			deviceName,
+			MAX_PATH)) {
+
+		DbgPrint("Error: GetVolumeNameForVolumeMountPoint failed : %d\n", GetLastError());
+	} else {
+	
+		DbgPrintW(L"UniqueVolumeName %s\n", deviceName);
+		DefineDosDevice(DDD_REMOVE_DEFINITION,
+						&volumeName[4],
+				        NULL);
+
+		if (!SetVolumeMountPoint(driveLetterAndSlash, deviceName)) {
+			DbgPrint("Error: SetVolumeMountPoint failed : %d\n", GetLastError());
+			return FALSE;
+		}
+	}
+	*/
+
+	//CreateMountPoint(L"C:\\mount\\dokan", L"\\??\\E:\\test4");
+	//CreateMountPoint(L"C:\\mount\\dokan", L"\\??\\Volume{dca0e0a5-d2ca-4f0f-8416-a6414657a77a}\\");
+	//CreateMountPoint(L"C:\\mount\\dokan", mountPoint);
+
+    device = CreateFile(
+        volumeName,
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
@@ -209,58 +242,53 @@ CreateDriveLetter(
         );
 
     if (device == INVALID_HANDLE_VALUE) {
-		DbgPrintW(L"DokanControl Mount %c failed:%d\n", DriveLetter, GetLastError());
-        DefineDosDevice(DDD_REMOVE_DEFINITION, dosDevice, NULL);
+		DbgPrintW(L"DokanControl Mount %ws failed:%d\n", volumeName, GetLastError());
+        DefineDosDevice(DDD_REMOVE_DEFINITION, &volumeName[4], NULL);
         return FALSE;
     }
 
 	CloseHandle(device);
-	return TRUE;
+
+    return TRUE;
 }
 
-BOOL
-DokanControlMount(
-	LPCWSTR	MountPoint,
-	LPCWSTR	DeviceName)
-{
-	ULONG length = wcslen(MountPoint);
-
-	if (length == 1 ||
-		(length == 2 && MountPoint[1] == L':') ||
-		(length == 3 && MountPoint[1] == L':' && MountPoint[2] == L'\\')) {
-		return CreateDriveLetter(MountPoint[0], DeviceName);
-	} else if (length > 3) {
-		return CreateMountPoint(MountPoint, DeviceName);
-	}
-	return FALSE; 
-}
 
 BOOL
 DokanControlUnmount(
-	LPCWSTR	MountPoint)
+	WCHAR DriveLetter)
 {
-    
-	ULONG	length = wcslen(MountPoint);
+    WCHAR   volumeName[] = L"\\\\.\\ :";
+    HANDLE  device;
 
-	if (length == 1 ||
-		(length == 2 && MountPoint[1] == L':') ||
-		(length == 3 && MountPoint[1] == L':' && MountPoint[2] == L'\\')) {
+    volumeName[4] = DriveLetter;
+/*
+    device = CreateFile(
+        volumeName,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_NO_BUFFERING,
+        NULL
+        );
 
-		WCHAR   drive[] = L"C:";	
-	    drive[0] = MountPoint[0];
+    if (device == INVALID_HANDLE_VALUE) {
+		DbgPrintW(L"DriveLetter %wc\n", DriveLetter);
+        DbgPrintW(L"DokanControl Unmount failed\n");
+        return FALSE;
+    }
 
-		if (!DefineDosDevice(DDD_REMOVE_DEFINITION, drive, NULL)) {
-			DbgPrintW(L"DriveLetter %c\n", MountPoint[0]);
-			DbgPrintW(L"DokanControl DefineDosDevice failed\n");
-			return FALSE;
-		} else {
-			DbgPrintW(L"DokanControl DD_REMOVE_DEFINITION success\n");
-			return TRUE;
-		}
-
-	} else if (length > 3 ) {
-		return DeleteMountPoint(MountPoint);
+    CloseHandle(device);
+*/
+    if (!DefineDosDevice(DDD_REMOVE_DEFINITION, &volumeName[4], NULL)) {
+		DbgPrintW(L"DriveLetter %wc\n", DriveLetter);
+        DbgPrintW(L"DokanControl DefineDosDevice failed\n");
+        return FALSE;
+	} else {
+		DbgPrintW(L"DokanControl DD_REMOVE_DEFINITION success\n");
 	}
 
-	return FALSE;
+	DeleteMountPoint(L"C:\\mount\\dokan");
+
+	return TRUE;
 }

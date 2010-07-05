@@ -44,11 +44,11 @@ typedef struct _DOKAN_INSTANCE {
 	// store CurrentDeviceName
 	// (when there are many mounts, each mount use 
 	// other DeviceName)
-	WCHAR	DeviceName[64];
-	WCHAR	MountPoint[MAX_PATH];
-
+	WCHAR	DeviceName[MAX_PATH];
 	ULONG	DeviceNumber;
 	ULONG	MountId;
+
+	WCHAR	DriveLetter;
 
 	PDOKAN_OPTIONS		DokanOptions;
 	PDOKAN_OPERATIONS	DokanOperations;
@@ -74,7 +74,7 @@ DokanStart(
 
 BOOL
 SendToDevice(
-	LPCWSTR	DeviceName,
+	PWCHAR	DeviceName,
 	DWORD	IoControlCode,
 	PVOID	InputBuffer,
 	ULONG	InputLength,
@@ -82,8 +82,6 @@ SendToDevice(
 	ULONG	OutputLength,
 	PULONG	ReturnedLength);
 
-LPCWSTR
-GetRawDeviceName(LPCWSTR	DeviceName);
 
 DWORD __stdcall
 DokanLoop(
@@ -92,8 +90,14 @@ DokanLoop(
 
 BOOL
 DokanMount(
-	LPCWSTR	MountPoint,
-	LPCWSTR	DeviceName);
+	ULONG	DeviceNumber,
+	WCHAR	DriveLetter);
+
+BOOL
+DokanSendIoControl(
+	WCHAR	DriveLetter,
+	DWORD	IoControlCode);
+
 
 VOID
 SendEventInformation(
@@ -196,20 +200,6 @@ DispatchLock(
 	PDOKAN_INSTANCE		DokanInstance);
 
 
-VOID
-DispatchQuerySecurity(
-	HANDLE				Handle,
-	PEVENT_CONTEXT		EventContext,
-	PDOKAN_INSTANCE		DokanInstance);
-
-
-VOID
-DispatchSetSecurity(
-	HANDLE			Handle,
-	PEVENT_CONTEXT	EventContext,
-	PDOKAN_INSTANCE	DokanInstance);
-
-
 BOOLEAN
 InstallDriver(
 	SC_HANDLE  SchSCManager,
@@ -244,7 +234,13 @@ ManageDriver(
 
 BOOL
 SendReleaseIRP(
-	LPCWSTR DeviceName);
+	WCHAR DriveLetter);
+
+
+BOOL
+SendReleaseIRP2(
+	ULONG DeviceNumber);
+
 
 VOID
 CheckFileName(

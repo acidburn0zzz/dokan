@@ -47,7 +47,7 @@ int DokanGetVolumeInformation(
 	DWORD		FileSystemNameSize,
 	PDOKAN_FILE_INFO	DokanFileInfo)
 {
-	wcscpy_s(VolumeNameBuffer, VolumeNameSize / sizeof(WCHAR), L"DOKAN");
+	wcscat(VolumeNameBuffer, L"DOKAN");
 	*VolumeSerialNumber = 0x19831116;
 	*MaximumComponentLength = 256;
 	*FileSystemFlags = FILE_CASE_SENSITIVE_SEARCH | 
@@ -55,7 +55,7 @@ int DokanGetVolumeInformation(
 						FILE_SUPPORTS_REMOTE_STORAGE |
 						FILE_UNICODE_ON_DISK;
 
-	wcscpy_s(FileSystemNameBuffer, FileSystemNameSize / sizeof(WCHAR), L"Dokan");
+	wcscat(FileSystemNameBuffer, L"dokan");
 
 	return 0;
 }

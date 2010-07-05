@@ -24,6 +24,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 BOOL DOKANAPI
 DokanResetTimeout(ULONG Timeout, PDOKAN_FILE_INFO FileInfo)
 {
+	WCHAR	deviceName[MAX_PATH];
 	BOOL	status;
 	ULONG	returnedLength;
 	PDOKAN_INSTANCE		instance;
@@ -53,8 +54,10 @@ DokanResetTimeout(ULONG Timeout, PDOKAN_FILE_INFO FileInfo)
 	eventInfo->SerialNumber = eventContext->SerialNumber;
 	eventInfo->ResetTimeout.Timeout = Timeout;
 
+	wsprintf(deviceName, DOKAN_DEVICE_NAME, instance->DeviceNumber);
+
 	status = SendToDevice(
-				GetRawDeviceName(instance->DeviceName),
+				deviceName,
 				IOCTL_RESET_TIMEOUT,
 				eventInfo,
 				eventInfoSize,
@@ -76,7 +79,7 @@ DokanKeepAlive(
 	BOOL	status;
 
 	device = CreateFile(
-				GetRawDeviceName(DokanInstance->DeviceName),
+				DokanInstance->DeviceName,
 				GENERIC_READ | GENERIC_WRITE,       // dwDesiredAccess
                 FILE_SHARE_READ | FILE_SHARE_WRITE, // dwShareMode
                 NULL,                               // lpSecurityAttributes
@@ -85,7 +88,8 @@ DokanKeepAlive(
                 NULL                                // hTemplateFile
 			);
 
-    while(device != INVALID_HANDLE_VALUE) {
+    while(device != INVALID_HANDLE_VALUE &&
+		DokanInstance->DokanOptions->DriveLetter != 0) {
 
 		status = DeviceIoControl(
 					device,                 // Handle to device

@@ -21,11 +21,6 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include "dokan.h"
 
-#ifdef ALLOC_PRAGMA
-#pragma alloc_text (PAGE, DokanDispatchCreate)
-#endif
-
-
 // We must NOT call without VCB lcok
 PDokanFCB
 DokanAllocateFCB(
@@ -78,8 +73,6 @@ DokanAllocateFCB(
 	InitializeListHead(&fcb->NextCCB);
 	InsertTailList(&Vcb->NextFCB, &fcb->NextFCB);
 
-	InterlockedIncrement(&Vcb->FcbAllocated);
-
 	return fcb;
 }
 
@@ -94,7 +87,6 @@ DokanGetFCB(
 	PDokanFCB		fcb = NULL;
 	ULONG			pos;
 
-	KeEnterCriticalRegion();
 	ExAcquireResourceExclusiveLite(&Vcb->Resource, TRUE);
 
 	// search the FCB which is already allocated
@@ -133,7 +125,6 @@ DokanGetFCB(
 		if (fcb == NULL) {
 			ExFreePool(FileName);
 			ExReleaseResourceLite(&Vcb->Resource);
-			KeLeaveCriticalRegion();
 			return NULL;
 		}
 
@@ -149,10 +140,9 @@ DokanGetFCB(
 		ExFreePool(FileName);
 	}
 
-	ExReleaseResourceLite(&Vcb->Resource);
-	KeLeaveCriticalRegion();
-
 	InterlockedIncrement(&fcb->FileCount);
+
+	ExReleaseResourceLite(&Vcb->Resource);
 	return fcb;
 }
 
@@ -169,7 +159,6 @@ DokanFreeFCB(
 
 	vcb = Fcb->Vcb;
 
-	KeEnterCriticalRegion();
 	ExAcquireResourceExclusiveLite(&vcb->Resource, TRUE);
 	ExAcquireResourceExclusiveLite(&Fcb->Resource, TRUE);
 
@@ -194,8 +183,7 @@ DokanFreeFCB(
 		ExDeleteResourceLite(&Fcb->Resource);
 		ExDeleteResourceLite(&Fcb->MainResource);
 		ExDeleteResourceLite(&Fcb->PagingIoResource);
-
-		InterlockedIncrement(&vcb->FcbFreed);
+		
 		ExFreePool(Fcb);
 
 	} else {
@@ -203,7 +191,6 @@ DokanFreeFCB(
 	}
 
 	ExReleaseResourceLite(&vcb->Resource);
-	KeLeaveCriticalRegion();
 
 	return STATUS_SUCCESS;
 }
@@ -235,17 +222,12 @@ DokanAllocateCCB(
 
 	InitializeListHead(&ccb->NextCCB);
 
-	KeEnterCriticalRegion();
 	ExAcquireResourceExclusiveLite(&Fcb->Resource, TRUE);
-
 	InsertTailList(&Fcb->NextCCB, &ccb->NextCCB);
-
 	ExReleaseResourceLite(&Fcb->Resource);
-	KeLeaveCriticalRegion();
 
 	ccb->MountId = Dcb->MountId;
 
-	InterlockedIncrement(&Fcb->Vcb->CcbAllocated);
 	return ccb;
 }
 
@@ -262,13 +244,9 @@ DokanFreeCCB(
 	
 	fcb = ccb->Fcb;
 
-	KeEnterCriticalRegion();
 	ExAcquireResourceExclusiveLite(&fcb->Resource, TRUE);
-
 	RemoveEntryList(&ccb->NextCCB);
-
 	ExReleaseResourceLite(&fcb->Resource);
-	KeLeaveCriticalRegion();
 
 	ExDeleteResourceLite(&ccb->Resource);
 
@@ -277,7 +255,6 @@ DokanFreeCCB(
 	}
 
 	ExFreePool(ccb);
-	InterlockedIncrement(&fcb->Vcb->CcbFreed);
 
 	return STATUS_SUCCESS;
 }
@@ -348,7 +325,6 @@ Return Value:
 	PDokanCCB			ccb;
 	PWCHAR				fileName;
 	BOOLEAN				needBackSlashAfterRelatedFile = FALSE;
-	HANDLE				accessTokenHandle;
 
 	PAGED_CODE();
 
@@ -625,6 +601,7 @@ DokanCompleteCreate(
 	}
 	ExReleaseResourceLite(&ccb->Resource);
 
+
 	if (NT_SUCCESS(status)) {
 		if (info == FILE_CREATED) {
 			if (fcb->Flags & DOKAN_FILE_DIRECTORY) {
@@ -633,10 +610,6 @@ DokanCompleteCreate(
 				DokanNotifyReportChange(fcb, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_ADDED);
 			}
 		}
-	} else {
-		DDbgPrint("   IRP_MJ_CREATE failed. Free CCB:%X\n", ccb);
-		DokanFreeCCB(ccb);
-		DokanFreeFCB(fcb);
 	}
 	
 	irp->IoStatus.Status = status;
@@ -646,4 +619,7 @@ DokanCompleteCreate(
 	DokanPrintNTStatus(status);
 	DDbgPrint("<== DokanCompleteCreate\n");
 }
+
+
+
 

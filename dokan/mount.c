@@ -119,36 +119,25 @@ DokanServiceControl(
 
 
 
-BOOL DOKANAPI
-DokanMountControl(PDOKAN_CONTROL Control)
+static BOOL
+DokanControl(PDOKAN_CONTROL Control)
 {
 	HANDLE pipe;
 	DWORD writtenBytes;
 	DWORD readBytes;
 	DWORD pipeMode;
-	DWORD error;
 
-	for (;;) {
-		pipe = CreateFile(DOKAN_CONTROL_PIPE,  GENERIC_READ|GENERIC_WRITE,
-						0, NULL, OPEN_EXISTING, 0, NULL);
-		if (pipe != INVALID_HANDLE_VALUE) {
-			break;
-		}
+	pipe = CreateFile(DOKAN_CONTROL_PIPE,
+		GENERIC_READ|GENERIC_WRITE,
+		0, NULL, OPEN_EXISTING, 0, NULL);
 
-		error = GetLastError();
-		if (error == ERROR_PIPE_BUSY) {
-			if (!WaitNamedPipe(DOKAN_CONTROL_PIPE, NMPWAIT_USE_DEFAULT_WAIT)) {
-				DbgPrint("DokanMounter service : ERROR_PIPE_BUSY\n");
-				return FALSE;
-			}
-			continue;
-		} else if (error == ERROR_ACCESS_DENIED) {
+	if (pipe == INVALID_HANDLE_VALUE) {
+		if (GetLastError() == ERROR_ACCESS_DENIED) {
 			DbgPrint("failed to connect DokanMounter service: access denied\n");
-			return FALSE;
 		} else {
 			DbgPrint("failed to connect DokanMounter service: %d\n", GetLastError());
-			return FALSE;
 		}
+		return FALSE;
 	}
 
 	pipeMode = PIPE_READMODE_MESSAGE|PIPE_WAIT;
@@ -238,42 +227,43 @@ DokanServiceDelete(
 
 BOOL DOKANAPI
 DokanUnmount(
-	LPCWSTR MountPoint)
+	WCHAR DriveLetter)
 {
 	DOKAN_CONTROL control;
-	BOOL result;
+
+	SendReleaseIRP(DriveLetter);
 
 	ZeroMemory(&control, sizeof(DOKAN_CONTROL));
 	control.Type = DOKAN_CONTROL_UNMOUNT;
-	wcscpy_s(control.MountPoint, sizeof(control.MountPoint) / sizeof(WCHAR), MountPoint);
+	control.Unmount.Drive = DriveLetter;
 
-	result = DokanMountControl(&control);
-	if (result) {
-		DbgPrint("DokanControl recieved DeviceName:%ws\n", control.DeviceName);
-		SendReleaseIRP(control.DeviceName);
+	if (DokanControl(&control)) {
+		return TRUE;
+	} else {
+		return FALSE;
 	}
-	return result;
 }
+
 
 BOOL
 DokanMount(
-	LPCWSTR	MountPoint,
-	LPCWSTR	DeviceName)
+	ULONG	DeviceNumber,
+	WCHAR	DriveLetter)
 {
 	DOKAN_CONTROL control;
 
 	ZeroMemory(&control, sizeof(DOKAN_CONTROL));
 	control.Type = DOKAN_CONTROL_MOUNT;
 
-	wcscpy_s(control.MountPoint, sizeof(control.MountPoint) / sizeof(WCHAR), MountPoint);
-	wcscpy_s(control.DeviceName, sizeof(control.DeviceName) / sizeof(WCHAR), DeviceName);
+	control.Mount.Device = DeviceNumber;
+	control.Mount.Drive = DriveLetter;
 
-	return  DokanMountControl(&control);
+	return  DokanControl(&control);
 }
 
 
 #define DOKAN_NP_SERVICE_KEY	L"System\\CurrentControlSet\\Services\\Dokan"
-#define DOKAN_NP_DEVICE_NAME	L"\\Device\\DokanRedirector"
+#define DOKAN_NP_DEVICE_NAME	L"\\Device\\dokan"
 #define DOKAN_NP_NAME			L"DokanNP"
 #define DOKAN_NP_PATH			L"System32\\dokannp.dll"
 #define DOKAN_NP_ORDER_KEY		L"System\\CurrentControlSet\\Control\\NetworkProvider\\Order"
@@ -307,7 +297,7 @@ DokanNetworkProviderInstall()
 	RegQueryValueEx(key, L"ProviderOrder", 0, &type, (BYTE*)&buffer, &buffer_size);
 
 	if (wcsstr(buffer, L",Dokan") == NULL) {
-		wcscat_s(buffer, sizeof(buffer) / sizeof(WCHAR), L",Dokan");
+		wcscat(buffer, L",Dokan");
 		RegSetValueEx(key, L"ProviderOrder", 0, REG_SZ,
 			(BYTE*)&buffer, (wcslen(buffer) + 1) * sizeof(WCHAR));
 	}
@@ -340,8 +330,8 @@ DokanNetworkProviderUninstall()
 
 	if (wcsstr(buffer, L",Dokan") != NULL) {
 		WCHAR* dokan_pos = wcsstr(buffer, L",Dokan");
-		wcsncpy_s(buffer2, sizeof(buffer2) / sizeof(WCHAR), buffer, dokan_pos - buffer);
-		wcscat_s(buffer2, sizeof(buffer2) / sizeof(WCHAR), dokan_pos + wcslen(L",Dokan"));
+		wcsncpy(buffer2, buffer, dokan_pos - buffer);
+		wcscat(buffer2, dokan_pos + wcslen(L",Dokan"));
 		RegSetValueEx(key, L"ProviderOrder", 0, REG_SZ,
 			(BYTE*)&buffer2, (wcslen(buffer2) + 1) * sizeof(WCHAR));
 	}

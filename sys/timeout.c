@@ -22,6 +22,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include "dokan.h"
 
+int __cdecl swprintf(wchar_t *, const wchar_t *, ...);
+
 VOID
 DokanUnmount(
 	__in PDokanDCB Dcb
@@ -33,7 +35,6 @@ DokanUnmount(
 	PKEVENT					completedEvent;
 	LARGE_INTEGER			timeout;
 	PDokanVCB				vcb = Dcb->Vcb;
-	ULONG					deviceNamePos;
 
 	eventLength = sizeof(EVENT_CONTEXT);
 	eventContext = AllocateEventContextRaw(eventLength);
@@ -52,14 +53,10 @@ DokanUnmount(
 		driverEventContext->Completed = completedEvent;
 	}
 
-	deviceNamePos = Dcb->SymbolicLinkName->Length / sizeof(WCHAR) - 1;
-	for (; Dcb->SymbolicLinkName->Buffer[deviceNamePos] != L'\\'; --deviceNamePos)
-		;
-	RtlStringCchCopyW(eventContext->Unmount.DeviceName,
-			sizeof(eventContext->Unmount.DeviceName) / sizeof(WCHAR),
-			&(Dcb->SymbolicLinkName->Buffer[deviceNamePos]));
+	// set drive letter
+	eventContext->Flags = Dcb->Mounted;
 
-	DDbgPrint("  Send Unmount to Service : %ws\n", eventContext->Unmount.DeviceName);
+	DDbgPrint("  Send Unmount to Service : %wc\n", Dcb->Mounted);
 
 	DokanEventNotification(&Dcb->Global->NotifyService, eventContext);
 
@@ -89,7 +86,6 @@ DokanCheckKeepAlive(
 
 	//DDbgPrint("==> DokanCheckKeepAlive\n");
 
-	KeEnterCriticalRegion();
 	KeQueryTickCount(&tickCount);
 	ExAcquireResourceSharedLite(&Dcb->Resource, TRUE);
 
@@ -99,11 +95,10 @@ DokanCheckKeepAlive(
 
 		ExReleaseResourceLite(&Dcb->Resource);
 
-		DDbgPrint("  Timeout, force to umount\n");
+		DDbgPrint("  Force to umount\n");
 
 		if (!mounted) {
 			// not mounted
-			KeLeaveCriticalRegion();
 			return;
 		}
 		DokanUnmount(Dcb);
@@ -112,7 +107,6 @@ DokanCheckKeepAlive(
 		ExReleaseResourceLite(&Dcb->Resource);
 	}
 
-	KeLeaveCriticalRegion();
 	//DDbgPrint("<== DokanCheckKeepAlive\n");
 }
 
@@ -170,7 +164,7 @@ ReleaseTimeoutPendingIrp(
 		if (irp == NULL) {
 			// this IRP has already been canceled
 			ASSERT(irpEntry->CancelRoutineFreeMemory == FALSE);
-			DokanFreeIrpEntry(irpEntry);
+			ExFreePool(irpEntry);
 			continue;
 		}
 
@@ -198,7 +192,7 @@ ReleaseTimeoutPendingIrp(
 		irp = irpEntry->Irp;
 		irp->IoStatus.Information = 0;
 		irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
-		DokanFreeIrpEntry(irpEntry);
+		ExFreePool(irpEntry);
 		IoCompleteRequest(irp, IO_NO_INCREMENT);
 	}
 
@@ -263,7 +257,6 @@ DokanResetPendingIrpTimeout(
 }
 
 
-KSTART_ROUTINE DokanTimeoutThread;
 VOID
 DokanTimeoutThread(
 	PDokanDCB	Dcb)

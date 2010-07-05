@@ -19,14 +19,28 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 
 
+/*++
+
+--*/
+
 #include "dokan.h"
 
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text (INIT, DriverEntry)
 #pragma alloc_text (PAGE, DokanUnload)
+#pragma alloc_text (PAGE, DokanDispatchCreate)
+#pragma alloc_text (PAGE, DokanDispatchClose)
 #pragma alloc_text (PAGE, DokanDispatchShutdown)
+#pragma alloc_text (PAGE, DokanDispatchFileSystemControl)
+#pragma alloc_text (PAGE, DokanDispatchDeviceControl)
+#pragma alloc_text (PAGE, DokanDispatchDirectoryControl)
+#pragma alloc_text (PAGE, DokanDispatchQueryInformation)
+#pragma alloc_text (PAGE, DokanDispatchSetInformation)
+#pragma alloc_text (PAGE, DokanDispatchQueryVolumeInformation)
+#pragma alloc_text (PAGE, DokanDispatchSetVolumeInformation)
 #pragma alloc_text (PAGE, DokanDispatchPnp)
+#pragma alloc_text (PAGE, DokanDispatchLock)
 #endif
 
 
@@ -36,9 +50,6 @@ ULONG g_Debug = DOKAN_DEBUG_DEFAULT;
 	PFN_FSRTLTEARDOWNPERSTREAMCONTEXTS DokanFsRtlTeardownPerStreamContexts;
 #endif
 
-NPAGED_LOOKASIDE_LIST	DokanIrpEntryLookasideList;
-
-FAST_IO_CHECK_IF_POSSIBLE DokanFastIoCheckIfPossible;
 
 BOOLEAN
 DokanFastIoCheckIfPossible (
@@ -73,7 +84,8 @@ DokanFastIoRead (
 	return FALSE;
 }
 
-FAST_IO_ACQUIRE_FILE DokanAcquireForCreateSection;
+
+
 VOID
 DokanAcquireForCreateSection(
 	__in PFILE_OBJECT FileObject
@@ -89,7 +101,7 @@ DokanAcquireForCreateSection(
 	DDbgPrint("DokanAcquireForCreateSection\n");
 }
 
-FAST_IO_RELEASE_FILE DokanReleaseForCreateSection;
+
 VOID
 DokanReleaseForCreateSection(
    __in PFILE_OBJECT FileObject
@@ -105,28 +117,6 @@ DokanReleaseForCreateSection(
 	DDbgPrint("DokanReleaseForCreateSection\n");
 }
 
-NTSTATUS
-DokanFilterCallbackAcquireForCreateSection(
-	__in PFS_FILTER_CALLBACK_DATA CallbackData,
-    __out PVOID *CompletionContext
-	)
-{
-	PFSRTL_ADVANCED_FCB_HEADER	header;
-	DDbgPrint("DokanFilterCallbackAcquireForCreateSection\n");
-
-	header = CallbackData->FileObject->FsContext;
-
-	if (header && header->Resource) {
-		ExAcquireResourceExclusiveLite(header->Resource, TRUE);
-	}
-
-	if (CallbackData->Parameters.AcquireForSectionSynchronization.SyncType
-		!= SyncTypeCreateSection) {
-		return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
-	} else {
-		return STATUS_FILE_LOCKED_WITH_WRITERS;
-	}
-}
 
 NTSTATUS
 DriverEntry(
@@ -156,12 +146,10 @@ Return Value:
 	NTSTATUS			status;
 	PFAST_IO_DISPATCH	fastIoDispatch;
 	UNICODE_STRING		functionName;
-	FS_FILTER_CALLBACKS filterCallbacks;
-	PDOKAN_GLOBAL		dokanGlobal = NULL;
 
 	DDbgPrint("==> DriverEntry ver.%x, %s %s\n", DOKAN_VERSION, __DATE__, __TIME__);
 
-	status = DokanCreateGlobalDiskDevice(DriverObject, &dokanGlobal);
+	status = DokanCreateGlobalDiskDevice(DriverObject);
 
 	if (status != STATUS_SUCCESS) {
 		return status;
@@ -194,9 +182,6 @@ Return Value:
 
 	DriverObject->MajorFunction[IRP_MJ_LOCK_CONTROL]		= DokanDispatchLock;
 
-	DriverObject->MajorFunction[IRP_MJ_QUERY_SECURITY]		= DokanDispatchQuerySecurity;
-	DriverObject->MajorFunction[IRP_MJ_SET_SECURITY]		= DokanDispatchSetSecurity;
-
 	fastIoDispatch = ExAllocatePool(sizeof(FAST_IO_DISPATCH));
 	// TODO: check fastIoDispatch
 
@@ -217,29 +202,10 @@ Return Value:
 	DriverObject->FastIoDispatch = fastIoDispatch;
 
 
-	ExInitializeNPagedLookasideList(
-		&DokanIrpEntryLookasideList, NULL, NULL, 0, sizeof(IRP_ENTRY), TAG, 0);
-
-
 #if _WIN32_WINNT < 0x0501
     RtlInitUnicodeString(&functionName, L"FsRtlTeardownPerStreamContexts");
     DokanFsRtlTeardownPerStreamContexts = MmGetSystemRoutineAddress(&functionName);
 #endif
-
-    RtlZeroMemory(&filterCallbacks, sizeof(FS_FILTER_CALLBACKS));
-
-	// only be used by filter driver?
-	filterCallbacks.SizeOfFsFilterCallbacks = sizeof(FS_FILTER_CALLBACKS);
-	filterCallbacks.PreAcquireForSectionSynchronization = DokanFilterCallbackAcquireForCreateSection;
-
-	status = FsRtlRegisterFileSystemFilterCallbacks(DriverObject, &filterCallbacks);
-
-	if (!NT_SUCCESS(status)) {
-		IoDeleteDevice(dokanGlobal->DeviceObject);
-		DDbgPrint("  FsRtlRegisterFileSystemFilterCallbacks returned 0x%x\n", status);
-		return status;
-	}
-
 
 	DDbgPrint("<== DriverEntry\n");
 
@@ -251,6 +217,7 @@ VOID
 DokanUnload(
 	__in PDRIVER_OBJECT DriverObject
 	)
+
 /*++
 
 Routine Description:
@@ -270,11 +237,12 @@ Return Value:
 {
 
 	PDEVICE_OBJECT	deviceObject = DriverObject->DeviceObject;
-	WCHAR			symbolicLinkBuf[] = DOKAN_GLOBAL_SYMBOLIC_LINK_NAME;
+	WCHAR			symbolicLinkBuf[] = SYMBOLIC_NAME_STRING;
 	UNICODE_STRING	symbolicLinkName;
 
-	PAGED_CODE();
 	DDbgPrint("==> DokanUnload\n");
+
+	PAGED_CODE();
 
 	if (GetIdentifierType(deviceObject->DeviceExtension) == DGL) {
 		DDbgPrint("  Delete Global DeviceObject\n");
@@ -282,8 +250,6 @@ Return Value:
 		IoDeleteSymbolicLink(&symbolicLinkName);
 		IoDeleteDevice(deviceObject);
 	}
-
-	ExDeleteNPagedLookasideList(&DokanIrpEntryLookasideList);
 
 	DDbgPrint("<== DokanUnload\n");
 	return;
@@ -297,13 +263,7 @@ DokanDispatchShutdown(
 	__in PIRP Irp
    )
 {
-	PAGED_CODE();
 	DDbgPrint("==> DokanShutdown\n");
-
-	Irp->IoStatus.Status = STATUS_SUCCESS;
-	Irp->IoStatus.Information = 0;
-	IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
 	DDbgPrint("<== DokanShutdown\n");
 	return STATUS_SUCCESS;
 }
@@ -539,31 +499,3 @@ DokanCheckCCB(
 
 	return TRUE;
 }
-
-
-NTSTATUS
-DokanAllocateMdl(
-	__in PIRP	Irp,
-	__in ULONG	Length
-	)
-{
-	if (Irp->MdlAddress == NULL) {
-		PMDL mdl = IoAllocateMdl(Irp->UserBuffer, Length, FALSE, FALSE, Irp);
-
-		if (mdl == NULL) {
-			DDbgPrint("    IoAllocateMdl returned NULL\n");
-			return STATUS_INSUFFICIENT_RESOURCES;
-		}
-		__try {
-			MmProbeAndLockPages(Irp->MdlAddress, Irp->RequestorMode, IoWriteAccess);
-
-		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			DDbgPrint("    MmProveAndLockPages error\n");
-			IoFreeMdl(Irp->MdlAddress);
-			Irp->MdlAddress = NULL;
-			return STATUS_INSUFFICIENT_RESOURCES;
-		}
-	}
-	return STATUS_SUCCESS;
-}
-

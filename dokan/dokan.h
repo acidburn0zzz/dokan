@@ -49,7 +49,7 @@ extern "C" {
 #define DOKAN_OPTION_REMOVABLE	32 // use removable drive
 
 typedef struct _DOKAN_OPTIONS {
-	LPCWSTR	MountPoint; //  mount point "M:\" (drive letter) or "C:\mount\dokan" (path in NTFS)
+	WCHAR	DriveLetter; // drive letter to be mounted
 	USHORT	ThreadCount; // number of threads to be used
 	ULONG	Options;	 // combination of DOKAN_OPTIONS_*
 	ULONG64	GlobalContext; // FileSystem can use this variable
@@ -220,22 +220,6 @@ typedef struct _DOKAN_OPERATIONS {
 		PDOKAN_FILE_INFO);
 
 
-	int (DOKAN_CALLBACK *GetFileSecurity) (
-		LPCWSTR, // FileName
-		PSECURITY_INFORMATION, // A pointer to SECURITY_INFORMATION value being requested
-		PSECURITY_DESCRIPTOR, // A pointer to SECURITY_DESCRIPTOR buffer to be filled
-		ULONG, // length of Security descriptor buffer
-		PULONG, // LengthNeeded
-		PDOKAN_FILE_INFO);
-
-	int (DOKAN_CALLBACK *SetFileSecurity) (
-		LPCWSTR, // FileName
-		PSECURITY_INFORMATION,
-		PSECURITY_DESCRIPTOR, // SecurityDescriptor
-		ULONG, // SecurityDescriptor length
-		PDOKAN_FILE_INFO);
-
-
 	// Neither GetDiskFreeSpace nor GetVolumeInformation
 	// save the DokanFileContext->Context.
 	// Before these methods are called, CreateFile may not be called.
@@ -274,8 +258,8 @@ typedef struct _DOKAN_OPERATIONS {
 #define DOKAN_DRIVE_LETTER_ERROR	-2 /* Bad Drive letter */
 #define DOKAN_DRIVER_INSTALL_ERROR	-3 /* Can't install driver */
 #define DOKAN_START_ERROR			-4 /* Driver something wrong */
-#define DOKAN_MOUNT_ERROR			-5 /* Can't assign a drive letter or mount point */
-#define DOKAN_MOUNT_POINT_ERROR		-6 /* Mount point is invalid */
+#define DOKAN_MOUNT_ERROR			-5 /* Can't assign a drive letter */
+
 
 int DOKANAPI
 DokanMain(
@@ -285,7 +269,7 @@ DokanMain(
 
 BOOL DOKANAPI
 DokanUnmount(
-	LPCWSTR MountPoint);
+	WCHAR DriveLetter);
 
 
 // DokanIsNameInExpression
@@ -311,12 +295,28 @@ DokanResetTimeout(
 	ULONG				Timeout,	// timeout in millisecond
 	PDOKAN_FILE_INFO	DokanFileInfo);
 
-// Get the handle to Access Token
-// This method needs be called in CreateFile, OpenDirectory or CreateDirectly callback.
-// The caller must call CloseHandle for the returned handle.
-HANDLE DOKANAPI
-DokanOpenRequestorToken(
-	PDOKAN_FILE_INFO	DokanFileInfo);
+
+
+// for internal use
+// don't call
+BOOL DOKANAPI
+DokanServiceInstall(
+	LPCWSTR	ServiceName,
+	DWORD	ServiceType,
+	LPCWSTR ServiceFullPath);
+
+BOOL DOKANAPI
+DokanServiceDelete(
+	LPCWSTR	ServiceName);
+
+BOOL DOKANAPI
+DokanNetworkProviderInstall();
+
+BOOL DOKANAPI
+DokanNetworkProviderUninstall();
+
+BOOL DOKANAPI
+DokanSetDebugMode(ULONG Mode);
 
 #ifdef __cplusplus
 }

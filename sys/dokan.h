@@ -29,7 +29,6 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #include <ntifs.h>
 #include <ntdddisk.h>
-#include <ntstrsafe.h>
 
 #include "public.h"
 
@@ -37,23 +36,16 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 // DEFINES
 //
 
-#define DOKAN_DEBUG_DEFAULT 1
+#define DOKAN_DEBUG_DEFAULT 0
+//#define USE_DBGPRINT 1
 
+int __cdecl swprintf(wchar_t *, const wchar_t *, ...);
 extern ULONG g_Debug;
 
-#define DOKAN_GLOBAL_DEVICE_NAME			L"\\Device\\Dokan"
-#define DOKAN_GLOBAL_SYMBOLIC_LINK_NAME		L"\\DosDevices\\Global\\Dokan"
-
-#define DOKAN_FS_DEVICE_NAME		L"\\Device\\Dokan"
-#define DOKAN_DISK_DEVICE_NAME		L"\\Device\\Volume"
-#define DOKAN_SYMBOLIC_LINK_NAME    L"\\DosDevices\\Global\\Volume"
-
-#define DOKAN_NET_DEVICE_NAME			L"\\Device\\DokanRedirector"
-#define DOKAN_NET_SYMBOLIC_LINK_NAME    L"\\DosDevices\\Global\\DokanRedirector"
-
+#define NTDEVICE_NAME_STRING	L"\\Device\\dokan"
+#define SYMBOLIC_NAME_STRING    L"\\DosDevices\\Global\\dokan"
 #define VOLUME_LABEL			L"DOKAN"
-								// {D6CC17C5-1734-4085-BCE7-964F1E9F5DE9}
-#define DOKAN_BASE_GUID			{0xd6cc17c5, 0x1734, 0x4085, {0xbc, 0xe7, 0x96, 0x4f, 0x1e, 0x9f, 0x5d, 0xe9}}
+#define UNIQUE_VOLUME_NAME		L"\\DosDevices\\Global\\Volume{dca0e0a5-d2ca-4f0f-8416-a6414657a77a}"
 
 #define TAG (ULONG)'AKOD'
 
@@ -72,25 +64,23 @@ extern ULONG g_Debug;
 
 #define DOKAN_KEEPALIVE_TIMEOUT		(1000 * 15) // in millisecond
 
-#if _WIN32_NT > 0x501
+#ifdef USE_DBGPRINT
 	#define DDbgPrint(...) \
-		if (g_Debug) { KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "[DokanFS] " __VA_ARGS__ )); }
+	if (g_Debug) { DbgPrint("[DokanFS] " __VA_ARGS__); }
 #else
-	#define DDbgPrint(...) \
-		if (g_Debug) { DbgPrint("[DokanFS] " __VA_ARGS__); }
+	#if _WIN32_WINNT >= 0x0501
+		#define DDbgPrint(...)	\
+		if (g_Debug) { KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "[DokanFS] " __VA_ARGS__ )); }
+	#else
+        #define DDbgPrint(...) \
+		if (g_Debug) { KdPrint(("[DokanFS] " __VA_ARGS__)); }
+	#endif
 #endif
 
 #if _WIN32_WINNT < 0x0501
 	extern PFN_FSRTLTEARDOWNPERSTREAMCONTEXTS DokanFsRtlTeardownPerStreamContexts;
 #endif
 
-
-	
-extern NPAGED_LOOKASIDE_LIST	DokanIrpEntryLookasideList;
-#define DokanAllocateIrpEntry()		ExAllocateFromNPagedLookasideList(&DokanIrpEntryLookasideList)
-#define DokanFreeIrpEntry(IrpEntry)	ExFreeToNPagedLookasideList(&DokanIrpEntryLookasideList, IrpEntry)
-
-	
 //
 // FSD_IDENTIFIER_TYPE
 //
@@ -133,7 +123,6 @@ typedef struct _IRP_LIST {
 typedef struct _DOKAN_GLOBAL {
 	FSD_IDENTIFIER	Identifier;
 	ERESOURCE		Resource;
-	PDEVICE_OBJECT	DeviceObject;
 	ULONG			MountId;
 	// the list of waiting IRP for mount service
 	IRP_LIST		PendingService;
@@ -160,9 +149,10 @@ typedef struct _DokanDiskControlBlock {
 	IRP_LIST				PendingEvent;
 	IRP_LIST				NotifyEvent;
 
-	PUNICODE_STRING			DiskDeviceName;
-	PUNICODE_STRING			FileSystemDeviceName;
-	PUNICODE_STRING			SymbolicLinkName;
+	// while mounted, Mounted is set to drive letter
+	ULONG					Mounted;
+
+	UNICODE_STRING			VolumeName;
 
 	DEVICE_TYPE				DeviceType;
 	ULONG					DeviceCharacteristics;
@@ -177,12 +167,16 @@ typedef struct _DokanDiskControlBlock {
 
 	// the thread to deal with timeout
 	PKTHREAD				TimeoutThread;
+
 	PKTHREAD				EventNotificationThread;
 
+	// Device Number
+	ULONG					Number;
+
 	// When UseAltStream is 1, use Alternate stream
-	USHORT					UseAltStream;
-	USHORT					UseKeepAlive;
-	USHORT					Mounted;
+	ULONG					UseAltStream;
+
+	ULONG					UseKeepAlive;
 
 	// to make a unique id for pending IRP
 	ULONG					SerialNumber;
@@ -212,11 +206,6 @@ typedef struct _DokanVolumeControlBlock {
 	// NotifySync is used by notify directory change
     PNOTIFY_SYNC				NotifySync;
     LIST_ENTRY					DirNotifyList;
-
-	ULONG						FcbAllocated;
-	ULONG						FcbFreed;
-	ULONG						CcbAllocated;
-	ULONG						CcbFreed;
 
 } DokanVCB, *PDokanVCB;
 
@@ -259,7 +248,7 @@ typedef struct _DokanContextControlBlock
 	ULONG64				Context;
 	ULONG64				UserContext;
 	
-	PWCHAR				SearchPattern;
+	PVOID				SearchPattern;
 	ULONG				SearchPatternLength;
 
 	ULONG				Flags;
@@ -274,6 +263,7 @@ typedef struct _DokanContextControlBlock
 typedef struct _IRP_ENTRY {
 	LIST_ENTRY			ListEntry;
 	ULONG				SerialNumber;
+	PDokanDCB			Dcb;
 	PIRP				Irp;
 	PIO_STACK_LOCATION	IrpSp;
 	PFILE_OBJECT		FileObject;
@@ -292,24 +282,37 @@ typedef struct _DRIVER_EVENT_CONTEXT {
 
 DRIVER_INITIALIZE DriverEntry;
 
-__drv_dispatchType(IRP_MJ_CREATE)	DRIVER_DISPATCH DokanDispatchCreate;
-__drv_dispatchType(IRP_MJ_CLOSE)	DRIVER_DISPATCH DokanDispatchClose;
-__drv_dispatchType(IRP_MJ_READ)		DRIVER_DISPATCH DokanDispatchRead;
-__drv_dispatchType(IRP_MJ_WRITE)	DRIVER_DISPATCH DokanDispatchWrite;
-__drv_dispatchType(IRP_MJ_FLUSH_BUFFERS)	DRIVER_DISPATCH DokanDispatchFlush;
-__drv_dispatchType(IRP_MJ_CLEANUP)			DRIVER_DISPATCH DokanDispatchCleanup;
-__drv_dispatchType(IRP_MJ_DEVICE_CONTROL)		DRIVER_DISPATCH DokanDispatchDeviceControl;
-__drv_dispatchType(IRP_MJ_FILE_SYSTEM_CONTROL)	DRIVER_DISPATCH DokanDispatchFileSystemControl;
-__drv_dispatchType(IRP_MJ_DIRECTORY_CONTROL)	DRIVER_DISPATCH DokanDispatchDirectoryControl;
-__drv_dispatchType(IRP_MJ_QUERY_INFORMATION)	DRIVER_DISPATCH DokanDispatchQueryInformation;
-__drv_dispatchType(IRP_MJ_SET_INFORMATION)		DRIVER_DISPATCH DokanDispatchSetInformation;
-__drv_dispatchType(IRP_MJ_QUERY_VOLUME_INFORMATION)	DRIVER_DISPATCH DokanDispatchQueryVolumeInformation;
-__drv_dispatchType(IRP_MJ_SET_VOLUME_INFORMATION)	DRIVER_DISPATCH DokanDispatchSetVolumeInformation;
-__drv_dispatchType(IRP_MJ_SHUTDOWN)		DRIVER_DISPATCH DokanDispatchShutdown;
-__drv_dispatchType(IRP_MJ_PNP)			DRIVER_DISPATCH DokanDispatchPnp;
-__drv_dispatchType(IRP_MJ_LOCK_CONTROL)	DRIVER_DISPATCH DokanDispatchLock;
-__drv_dispatchType(IRP_MJ_QUERY_SECURITY)	DRIVER_DISPATCH DokanDispatchQuerySecurity;
-__drv_dispatchType(IRP_MJ_SET_SECURITY)		DRIVER_DISPATCH DokanDispatchSetSecurity;
+DRIVER_DISPATCH DokanDispatchCreate;
+
+DRIVER_DISPATCH DokanDispatchClose;
+
+DRIVER_DISPATCH DokanDispatchRead;
+
+DRIVER_DISPATCH DokanDispatchWrite;
+
+DRIVER_DISPATCH DokanDispatchFlush;
+
+DRIVER_DISPATCH DokanDispatchCleanup;
+
+DRIVER_DISPATCH DokanDispatchDeviceControl;
+
+DRIVER_DISPATCH DokanDispatchFileSystemControl;
+
+DRIVER_DISPATCH DokanDispatchDirectoryControl;
+
+DRIVER_DISPATCH DokanDispatchQueryInformation;
+
+DRIVER_DISPATCH DokanDispatchSetInformation;
+
+DRIVER_DISPATCH DokanDispatchQueryVolumeInformation;
+
+DRIVER_DISPATCH DokanDispatchSetVolumeInformation;
+
+DRIVER_DISPATCH DokanDispatchShutdown;
+
+DRIVER_DISPATCH DokanDispatchPnp;
+
+DRIVER_DISPATCH DokanDispatchLock;
 
 DRIVER_UNLOAD DokanUnload;
 
@@ -326,8 +329,6 @@ DRIVER_DISPATCH DokanRegisterPendingIrpForService;
 DRIVER_DISPATCH DokanCompleteIrp;
 
 DRIVER_DISPATCH DokanResetPendingIrpTimeout;
-
-DRIVER_DISPATCH DokanGetAccessToken;
 
 NTSTATUS
 DokanEventRelease(
@@ -430,16 +431,6 @@ DokanCompleteFlush(
 	__in PEVENT_INFORMATION	EventInfo);
 
 VOID
-DokanCompleteQuerySecurity(
-	__in PIRP_ENTRY		IrpEntry,
-	__in PEVENT_INFORMATION EventInfo);
-
-VOID
-DokanCompleteSetSecurity(
-	__in PIRP_ENTRY		IrpEntry,
-	__in PEVENT_INFORMATION EventInfo);
-
-VOID
 DokanNoOpRelease (
     IN PVOID Fcb);
 
@@ -450,14 +441,12 @@ DokanNoOpAcquire(
 
 NTSTATUS
 DokanCreateGlobalDiskDevice(
-	__in PDRIVER_OBJECT DriverObject,
-	__out PDOKAN_GLOBAL* DokanGlobal);
+	__in PDRIVER_OBJECT DriverObject);
 
 NTSTATUS
 DokanCreateDiskDevice(
 	__in PDRIVER_OBJECT DriverObject,
 	__in ULONG			MountId,
-	__in PWCHAR			BaseGuid,
 	__in PDOKAN_GLOBAL	DokanGlobal,
 	__in DEVICE_TYPE	DeviceType,
 	__in ULONG			DeviceCharacteristics,
@@ -546,11 +535,6 @@ DokanUnmount(
 VOID
 PrintIdType(
 	__in VOID* Id);
-
-NTSTATUS
-DokanAllocateMdl(
-	__in PIRP	Irp,
-	__in ULONG	Length);
 
 #endif // _DOKAN_H_
 

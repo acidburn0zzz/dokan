@@ -1,4 +1,4 @@
-/*I
+/*
   Dokan : user-mode file system library for Windows
 
   Copyright (C) 2008 Hiroki Asakawa info@dokan-dev.net
@@ -75,7 +75,7 @@ DokanIrpCancelRoutine(
 		if (irpEntry->CancelRoutineFreeMemory == FALSE) {
 			InitializeListHead(&irpEntry->ListEntry);
 		} else {
-			DokanFreeIrpEntry(irpEntry);
+			ExFreePool(irpEntry);
 			irpEntry = NULL;
 		}
 
@@ -121,10 +121,9 @@ RegisterPendingIrpMain(
     irpSp = IoGetCurrentIrpStackLocation(Irp);
  
     // Allocate a record and save all the event context.
-    irpEntry = DokanAllocateIrpEntry();
+    irpEntry = ExAllocatePool(sizeof(IRP_ENTRY));
 
     if (NULL == irpEntry) {
-		DDbgPrint("  can't allocate IRP_ENTRY\n");
         return  STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -134,6 +133,7 @@ RegisterPendingIrpMain(
 
 	irpEntry->SerialNumber		= SerialNumber;
     irpEntry->FileObject		= irpSp->FileObject;
+    irpEntry->Dcb				= DeviceObject->DeviceExtension;
     irpEntry->Irp				= Irp;
 	irpEntry->IrpSp				= irpSp;
 	irpEntry->IrpList			= IrpList;
@@ -151,7 +151,7 @@ RegisterPendingIrpMain(
 			//DDbgPrint("  Release IrpList.ListLock %d\n", __LINE__);
             KeReleaseSpinLock(&IrpList->ListLock, oldIrql);
 
-            DokanFreeIrpEntry(irpEntry);
+            ExFreePool(irpEntry);
 
             return STATUS_CANCELLED;
         }
@@ -174,6 +174,7 @@ RegisterPendingIrpMain(
 
 	//DDbgPrint("<== DokanRegisterPendingIrpMain\n");
     return STATUS_PENDING;;
+
 }
 
 
@@ -188,7 +189,6 @@ DokanRegisterPendingIrp(
 	NTSTATUS status;
 
 	if (GetIdentifierType(vcb) != VCB) {
-		DbgPrint("  Type != VCB\n");
 		return STATUS_INVALID_PARAMETER;
 	}
 
@@ -218,7 +218,6 @@ DokanRegisterPendingIrpForEvent(
 	PDokanVCB vcb = DeviceObject->DeviceExtension;
 
 	if (GetIdentifierType(vcb) != VCB) {
-		DbgPrint("  Type != VCB\n");
 		return STATUS_INVALID_PARAMETER;
 	}
 
@@ -313,7 +312,7 @@ DokanCompleteIrp(
 		if (irp == NULL) {
 			// this IRP is already canceled
 			ASSERT(irpEntry->CancelRoutineFreeMemory == FALSE);
-			DokanFreeIrpEntry(irpEntry);
+			ExFreePool(irpEntry);
 			irpEntry = NULL;
 			break;
 		}
@@ -366,19 +365,13 @@ DokanCompleteIrp(
 		case IRP_MJ_FLUSH_BUFFERS:
 			DokanCompleteFlush(irpEntry, eventInfo);
 			break;
-		case IRP_MJ_QUERY_SECURITY:
-			DokanCompleteQuerySecurity(irpEntry, eventInfo);
-			break;
-		case IRP_MJ_SET_SECURITY:
-			DokanCompleteSetSecurity(irpEntry, eventInfo);
-			break;
 		default:
 			DDbgPrint("Unknown IRP %d\n", irpSp->MajorFunction);
 			// TODO: in this case, should complete this IRP
 			break;
 		}		
 
-		DokanFreeIrpEntry(irpEntry);
+		ExFreePool(irpEntry);
 		irpEntry = NULL;
 
 		return STATUS_SUCCESS;
@@ -391,6 +384,7 @@ DokanCompleteIrp(
 	// TODO: should return error
     return STATUS_SUCCESS;
 }
+
 
  
 // start event dispatching
@@ -411,11 +405,6 @@ DokanEventStart(
 	NTSTATUS			status;
 	DEVICE_TYPE			deviceType;
 	ULONG				deviceCharacteristics;
-	WCHAR				baseGuidString[64];
-	GUID				baseGuid = DOKAN_BASE_GUID;
-	UNICODE_STRING		unicodeGuid;
-	ULONG				deviceNamePos;
-	
 
 	DDbgPrint("==> DokanEventStart\n");
 
@@ -465,26 +454,12 @@ DokanEventStart(
 		deviceCharacteristics |= FILE_REMOVABLE_MEDIA;
 	}
 
-	baseGuid.Data2 = (USHORT)(dokanGlobal->MountId & 0xFFFF) ^ baseGuid.Data2;
-	baseGuid.Data3 = (USHORT)(dokanGlobal->MountId >> 16) ^ baseGuid.Data3;
-
-	status = RtlStringFromGUID(&baseGuid, &unicodeGuid);
-	if (!NT_SUCCESS(status)) {
-		return status;
-	}
-	RtlZeroMemory(baseGuidString, sizeof(baseGuidString));
-	RtlStringCchCopyW(baseGuidString, sizeof(baseGuidString) / sizeof(WCHAR), unicodeGuid.Buffer);
-	RtlFreeUnicodeString(&unicodeGuid);
-
-	InterlockedIncrement(&dokanGlobal->MountId);
-
 	KeEnterCriticalRegion();
 	ExAcquireResourceExclusiveLite(&dokanGlobal->Resource, TRUE);
 
 	status = DokanCreateDiskDevice(
 				DeviceObject->DriverObject,
 				dokanGlobal->MountId,
-				baseGuidString,
 				dokanGlobal,
 				deviceType,
 				deviceCharacteristics,
@@ -501,18 +476,7 @@ DokanEventStart(
 	driverInfo->MountId = dokanGlobal->MountId;
 	driverInfo->Status = DOKAN_MOUNTED;
 	driverInfo->DriverVersion = DOKAN_VERSION;
-
-	// SymbolicName is \\DosDevices\\Global\\Volume{D6CC17C5-1734-4085-BCE7-964F1E9F5DE9}
-	// Finds the last '\' and copy into DeviceName.
-	// DeviceName is \Volume{D6CC17C5-1734-4085-BCE7-964F1E9F5DE9}
-	deviceNamePos = dcb->SymbolicLinkName->Length / sizeof(WCHAR) - 1;
-	for (; dcb->SymbolicLinkName->Buffer[deviceNamePos] != L'\\'; --deviceNamePos)
-		;
-	RtlStringCchCopyW(driverInfo->DeviceName,
-			sizeof(driverInfo->DeviceName) / sizeof(WCHAR),
-			&(dcb->SymbolicLinkName->Buffer[deviceNamePos]));
-
-	DDbgPrint("  DeviceName:%ws\n", driverInfo->DeviceName);
+	dcb->Mounted = eventStart.DriveLetter;
 	DokanUpdateTimeout(&dcb->TickCount, DOKAN_KEEPALIVE_TIMEOUT);
 
 	dcb->UseAltStream = 0;
@@ -525,8 +489,6 @@ DokanEventStart(
 		DDbgPrint("  KEEP_ALIVE_ON\n");
 		dcb->UseKeepAlive = 1;
 	}
-	dcb->Mounted = 1;
-
 	DokanStartEventNotificationThread(dcb);
 	DokanStartCheckThread(dcb);
 
@@ -535,6 +497,8 @@ DokanEventStart(
 
 	Irp->IoStatus.Status = STATUS_SUCCESS;
 	Irp->IoStatus.Information = sizeof(EVENT_DRIVER_INFO);
+
+	InterlockedIncrement(&dokanGlobal->MountId);
 
 	DDbgPrint("<== DokanEventStart\n");
 
@@ -598,7 +562,7 @@ DokanEventWrite(
 		if (writeIrp == NULL) {
 			// this IRP has already been canceled
 			ASSERT(irpEntry->CancelRoutineFreeMemory == FALSE);
-			DokanFreeIrpEntry(irpEntry);
+			ExFreePool(irpEntry);
 			continue;
 		}
 
@@ -657,4 +621,6 @@ DokanEventWrite(
 
    return STATUS_SUCCESS;
 }
+
+
 
